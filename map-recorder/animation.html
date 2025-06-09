@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Automated Animation Renderer</title>
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel='stylesheet' href='https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.css' />
+    <script src='https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js'></script>
+    <style>
+        body, html, #map { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+<div id="map"></div>
+<script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+    // --- IMPORTANT! GET YOUR KEY FROM MAPTILER.COM AND REPLACE THE PLACEHOLDER ---
+    const MAPTILER_API_KEY = 'jeL3brF1UlOKBwKPjzQO'; 
+
+    const map = new maplibregl.Map({
+        container: 'map',
+        style: `https://api.maptiler.com/maps/hybrid/style.json?key=${MAPTILER_API_KEY}`,
+        zoom: 17,
+        center: [148.979, -35.397],
+        pitch: 30,
+        bearing: 0,
+        interactive: false,
+        preserveDrawingBuffer: true,
+        fadeDuration: 0
+    });
+
+    const modelLocations = [
+        [148.9819, -35.39847],
+        [148.9780, -35.39950],
+        [148.9845, -35.39550]
+    ];
+
+    const modelMeshes = [];
+
+    const customLayer = {
+        id: '3d-models',
+        type: 'custom',
+        renderingMode: '3d',
+        onAdd(map, gl) {
+            this.camera = new THREE.Camera();
+            this.scene = new THREE.Scene();
+            const directionalLight = new THREE.DirectionalLight(0xffffff);
+            directionalLight.position.set(0, -70, 100).normalize();
+            this.scene.add(directionalLight);
+            const directionalLight2 = new THREE.DirectionalLight(0xffffff);
+            directionalLight2.position.set(0, 70, 100).normalize();
+            this.scene.add(directionalLight2);
+            
+            this.renderer = new THREE.WebGLRenderer({
+                canvas: map.getCanvas(),
+                context: gl,
+                antialias: true,
+            });
+            this.renderer.autoClear = false;
+
+            // --- CORRECTED TIMING LOGIC ---
+            // Load the model, and only after it's loaded and processed,
+            // signal back to Node.js that everything is ready.
+            const loader = new GLTFLoader();
+            loader.load(
+                'https://maplibre.org/maplibre-gl-js/docs/assets/34M_17/34M_17.gltf',
+                (gltf) => {
+                    gltf.scene.rotation.x = Math.PI / 2;
+                    for (let i = 0; i < modelLocations.length; i++) {
+                        const model = gltf.scene.clone();
+                        modelMeshes.push(model);
+                        this.scene.add(model);
+                    }
+                    // Now that models are loaded, signal that the map is ready.
+                    if (window.onMapReady) {
+                        console.log('Map and models are ready. Signaling to Node.js.');
+                        window.onMapReady();
+                    }
+                }
+            );
+        },
+        render(gl, args) {
+            if (modelMeshes.length < modelLocations.length) return;
+
+            const mapProjectionMatrix = new THREE.Matrix4().fromArray(args.defaultProjectionData.mainMatrix);
+
+            for (let i = 0; i < modelLocations.length; i++) {
+                const modelAsMercatorCoordinate = maplibregl.MercatorCoordinate.fromLngLat(modelLocations[i], 0);
+                const scale = modelAsMercatorCoordinate.meterInMercatorCoordinateUnits();
+                const modelMatrix = new THREE.Matrix4()
+                    .makeTranslation(modelAsMercatorCoordinate.x, modelAsMercatorCoordinate.y, modelAsMercatorCoordinate.z)
+                    .scale(new THREE.Vector3(scale, -scale, scale));
+                modelMeshes[i].matrix.copy(modelMatrix);
+                modelMeshes[i].matrixAutoUpdate = false;
+            }
+
+            this.camera.projectionMatrix.copy(mapProjectionMatrix);
+            this.renderer.resetState();
+            this.renderer.render(this.scene, this.camera);
+            
+            if (window.onFrameReady) {
+                window.onFrameReady();
+            }
+        }
+    };
+
+    const flightPath = [
+        { center: [148.9819, -35.3980], zoom: 17.5, pitch: 45, bearing: 30, speed: 0.8, curve: 1.2 },
+        { center: modelLocations[0], zoom: 19, pitch: 60, bearing: 60, speed: 0.5, curve: 1 },
+        { type: 'circle', center: modelLocations[0], duration: 10000, angle: 360, pitch: 55, zoom: 18.5, radius: 0.0005 },
+        { center: modelLocations[1], zoom: 18, pitch: 45, bearing: -30, speed: 0.6, curve: 1.5 },
+        { center: modelLocations[2], zoom: 18.8, pitch: 65, bearing: 120, speed: 0.7, curve: 1.3 },
+        { center: [148.9815, -35.3975], zoom: 16.5, pitch: 30, bearing: 20, duration: 5000 }
+    ];
+
+    async function runFlightAnimation() {
+        for (const chapter of flightPath) {
+            if (chapter.type === 'circle') {
+                await animateCircle(chapter);
+            } else {
+                await new Promise(resolve => {
+                    map.once('moveend', resolve);
+                    map.flyTo({ ...chapter, essential: true });
+                });
+            }
+        }
+        if (window.onAnimationComplete) {
+            window.onAnimationComplete();
+        }
+    }
+    
+    function animateCircle(options) {
+        return new Promise((resolve) => {
+            const { duration, center, angle, pitch, zoom, radius } = options;
+            const startBearing = map.getBearing();
+            const endBearing = startBearing + angle;
+            let startTime;
+            function frame(timestamp) {
+                if (!startTime) startTime = timestamp;
+                const progress = (timestamp - startTime) / duration;
+                if (progress >= 1) {
+                    map.easeTo({ bearing: endBearing, center, pitch, zoom, duration: 0 });
+                    resolve();
+                    return;
+                }
+                const currentBearing = startBearing + angle * progress;
+                const bearingRad = currentBearing * Math.PI / 180;
+                const centerMercator = maplibregl.MercatorCoordinate.fromLngLat(center);
+                const currentLngLat = new maplibregl.MercatorCoordinate(
+                     centerMercator.x + radius * Math.sin(bearingRad) * centerMercator.meterInMercatorCoordinateUnits(),
+                     centerMercator.y - radius * Math.cos(bearingRad) * centerMercator.meterInMercatorCoordinateUnits()
+                ).toLngLat();
+                map.easeTo({ center: currentLngLat, zoom, pitch, bearing: currentBearing, duration: 0 });
+                requestAnimationFrame(frame);
+            }
+            requestAnimationFrame(frame);
+        });
+    }
+
+    map.on('style.load', () => {
+        // The layer is added, but the crucial onMapReady signal is now sent
+        // from inside the onAdd method after models are loaded.
+        map.addLayer(customLayer);
+        window.startAnimation = runFlightAnimation;
+    });
+
+</script>
+</body>
+</html>

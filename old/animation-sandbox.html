@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Sentry Director's Cut</title>
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel='stylesheet' href='https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.css' />
+    <script src='https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.js'></script>
+    <script src="https://unpkg.com/@tweenjs/tween.js@23.1.2/dist/tween.umd.js"></script>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; width: 100%; background-color: #1a1a1a; overflow: hidden; }
+        #map { height: 100%; width: 100%; }
+        #record-controls { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.75); padding: 15px; border-radius: 8px; z-index: 10; }
+        #recordButton { padding: 10px 20px; font-size: 16px; background-color: #c0392b; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        #recordStatus { font-size: 12px; text-align: center; margin-top: 5px; color: #95a5a6; font-family: sans-serif; }
+    </style>
+    <script type="importmap">
+       { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/" } }
+    </script>
+</head>
+<body>
+    <div id="record-controls">
+       <button id="recordButton">🔴 Record Video</button>
+       <div id="recordStatus"></div>
+    </div>
+    <div id="map"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        const mapData = __MAP_DATA__;
+        const { modelPaths, objects, view, ...config } = mapData;
+        
+        const map = new maplibregl.Map({
+            container: 'map',
+            style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+            center: view.center,
+            zoom: config.mapZoom,
+            pitch: config.mapPitch,
+            bearing: config.mapBearing,
+            interactive: false,
+            antialias: true,
+        });
+        
+        const R_EARTH = 6371e3;
+        
+        function calculateCameraPosition(targetLngLat, pitch, bearing, zoom) {
+            const pitchRad = pitch * (Math.PI / 180);
+            const bearingRad = bearing * (Math.PI / 180);
+            const cameraAltitude = (800000 / Math.pow(2, zoom));
+            const groundDistance = cameraAltitude * Math.tan(pitchRad) + (config.modelAltitude / Math.sin(pitchRad));
+            const targetLatRad = targetLngLat.lat * (Math.PI / 180);
+            const latOffset = (groundDistance * Math.cos(bearingRad)) / R_EARTH;
+            const lngOffset = (groundDistance * Math.sin(bearingRad)) / (R_EARTH * Math.cos(targetLatRad));
+            return {
+                lng: targetLngLat.lng - (lngOffset * (180 / Math.PI)),
+                lat: targetLngLat.lat - (latOffset * (180 / Math.PI))
+            };
+        }
+
+        function getGroupCenter(groupId) {
+            const groupObjects = objects.filter(o => o.id.startsWith(groupId));
+            if (groupObjects.length === 0) return null;
+            const center = groupObjects.reduce((acc, obj) => {
+                acc.lng += obj.fromCoords.lon;
+                acc.lat += obj.fromCoords.lat;
+                return acc;
+            }, { lng: 0, lat: 0 });
+            center.lng /= groupObjects.length;
+            center.lat /= groupObjects.length;
+            return new maplibregl.LngLat(center.lng, center.lat);
+        }
+
+        const cameraState = { lng: view.center[0], lat: view.center[1], zoom: config.mapZoom, bearing: config.mapBearing, pitch: config.mapPitch };
+        
+        function setupCameraAnimation() {
+            const lvivCenter = getGroupCenter('lviv');
+            const kyivCenter = getGroupCenter('kyiv');
+            const kharkivCenter = getGroupCenter('kharkiv');
+
+            const keyframes = [
+                { ...calculateCameraPosition(lvivCenter, 70, 45, 10), zoom: 10, pitch: 70, bearing: 45, duration: 6000 },
+                { ...calculateCameraPosition(kyivCenter, 75, 90, 10.5), zoom: 10.5, pitch: 75, bearing: 90, duration: 6000 },
+                { ...calculateCameraPosition(kharkivCenter, 70, 135, 10), zoom: 10, pitch: 70, bearing: 135, duration: 6000 },
+                { lng: view.center[0], lat: view.center[1], zoom: config.mapZoom, pitch: config.mapPitch, bearing: 0, duration: 4000 }
+            ];
+
+            const tweens = keyframes.map(frame => new TWEEN.Tween(cameraState).to(frame, frame.duration).easing(TWEEN.Easing.Cubic.InOut));
+            for (let i = 0; i < tweens.length - 1; i++) tweens[i].chain(tweens[i + 1]);
+            tweens[tweens.length - 1].onComplete(() => setTimeout(() => tweens[0].start(), 2000));
+            return tweens[0];
+        }
+        
+        function mainAnimateLoop(time) {
+            TWEEN.update(time);
+            map.setCenter([cameraState.lng, cameraState.lat]);
+            map.setZoom(cameraState.zoom);
+            map.setPitch(cameraState.pitch);
+            map.setBearing(cameraState.bearing);
+            map.triggerRepaint();
+            requestAnimationFrame(mainAnimateLoop);
+        }
+
+        const customLayer = {
+           id: '3d-model-layer', type: 'custom', renderingMode: '3d',
+           onAdd(map, gl) {
+               this.camera = new THREE.Camera();
+               this.scene = new THREE.Scene();
+               this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true, alpha: true });
+               this.renderer.autoClear = false;
+               this.scene.add(new THREE.AmbientLight(0xffffff, 3.5));
+               const light = new THREE.DirectionalLight(0xffffff, 3.0);
+               light.position.set(0.5, -1, 1);
+               this.scene.add(light);
+               const loader = new GLTFLoader();
+
+               Promise.all(Object.entries(modelPaths).map(([key, val]) => new Promise(res => loader.load(val.path, gltf => res([key, gltf.scene])))))
+               .then(Object.fromEntries)
+               .then(loadedModels => {
+                    objects.forEach(obj => {
+                       const baseModel = loadedModels[obj.item] || loadedModels.default;
+                       if (!baseModel) return;
+                       const model = baseModel.clone(true);
+                       const { lon, lat } = obj.fromCoords;
+                       const mercator = maplibregl.MercatorCoordinate.fromLngLat([lon, lat], config.modelAltitude);
+                       const scale = mercator.meterInMercatorCoordinateUnits() * config.modelScaleFactor;
+                       const rotationMatrix = new THREE.Matrix4().makeRotationX(Math.PI / 2);
+                       model.userData = { mercator, scale, rotationMatrix };
+                       this.scene.add(model);
+                    });
+                    
+                    // *** THIS IS THE FIX: START ANIMATION ONLY AFTER MODELS ARE LOADED ***
+                    console.log("✅ Models loaded. Starting animation.");
+                    setupCameraAnimation().start();
+                    requestAnimationFrame(mainAnimateLoop);
+               });
+           },
+           render(gl, matrix) {
+                this.camera.projectionMatrix.fromArray(matrix);
+                for (const model of this.scene.children) {
+                   if (model.userData?.mercator) {
+                       const { mercator, scale, rotationMatrix } = model.userData;
+                       model.matrix = new THREE.Matrix4()
+                           .makeTranslation(mercator.x, mercator.y, mercator.z)
+                           .scale(new THREE.Vector3(scale, -scale, scale))
+                           .multiply(rotationMatrix);
+                   }
+                }
+                this.renderer.resetState();
+                this.renderer.render(this.scene, this.camera);
+           }
+        };
+        
+        map.on('load', () => {
+            // Remove all text labels for a clean video
+            const layers = map.getStyle().layers;
+            for (const layer of layers) {
+                if (layer.type === 'symbol' && layer.layout?.['text-field']) {
+                    map.removeLayer(layer.id);
+                }
+            }
+            map.addLayer(customLayer);
+        });
+
+       document.getElementById('recordButton').onclick = async () => {
+           const status = document.getElementById('recordStatus');
+           status.textContent = "Recording started...";
+           try {
+               const response = await fetch('/record');
+               const result = await response.json();
+               status.textContent = result.message;
+               setTimeout(() => status.textContent = "Click to record again.", 25000);
+           } catch (e) {
+               status.textContent = "Error: Is server running?";
+           }
+       };
+    </script>
+</body>
+</html>

@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+   <title>Sentry Cinematic Sandbox</title>
+   <meta charset='utf-8'>
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <link rel='stylesheet' href='https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.css' />
+   <script src='https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.js'></script>
+   <script src="https://unpkg.com/@tweenjs/tween.js@23.1.2/dist/tween.umd.js"></script>
+   <style>
+       body, html { margin: 0; padding: 0; height: 100%; width: 100%; background-color: #1a1a1a; overflow: hidden; font-family: sans-serif; color: #fff; }
+       #map { height: 100%; width: 100%; }
+       .maplibregl-ctrl-attrib { display: none !important; }
+       #controls { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.75); padding: 15px; border-radius: 8px; z-index: 10; width: 320px; backdrop-filter: blur(5px); }
+       h3 { margin-top: 0; border-bottom: 1px solid #555; padding-bottom: 5px; }
+       #animation-status { font-size: 14px; text-align: center; height: 20px; }
+       #recordButton { width: 100%; padding: 10px; font-size: 16px; background-color: #c0392b; color: white; border: none; border-radius: 4px; cursor: pointer; margin-top: 10px; }
+       #recordButton:hover { background-color: #e74c3c; }
+       #recordStatus { font-size: 12px; text-align: center; margin-top: 5px; color: #95a5a6; }
+   </style>
+   <script type="importmap">
+       {
+           "imports": {
+               "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+               "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+           }
+       }
+   </script>
+</head>
+<body>
+   <div id="controls">
+       <h3>Cinematic Animator</h3>
+       <div id="animation-status">Playing 15-second sequence...</div>
+       <button id="recordButton">🔴 Record 15s Video</button>
+       <div id="recordStatus"></div>
+   </div>
+   <div id="map"></div>
+
+   <script type="module">
+       import * as THREE from 'three';
+       import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+       const mapData = __MAP_DATA__;
+       const { modelPaths, objects, view, ...config } = mapData;
+       const objectState = {};
+
+       const map = new maplibregl.Map({
+           container: 'map',
+           style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+           center: view.center,
+           zoom: config.mapZoom,
+           pitch: config.mapPitch,
+           bearing: config.mapBearing,
+           interactive: false,
+           antialias: true
+       });
+
+       // --- Animation & Rendering Engine ---
+       const shahed = objects.find(o => o.item === 'shahed');
+       const rocket = objects.find(o => o.item === 'rocket');
+
+       const cameraState = {
+           lng: view.center[0],
+           lat: view.center[1],
+           zoom: config.mapZoom,
+           bearing: config.mapBearing,
+           pitch: config.mapPitch,
+       };
+
+       function setupCameraAnimation() {
+            const flyToShahed = new TWEEN.Tween(cameraState)
+                .to({
+                    lng: shahed.fromCoords.lon, lat: shahed.fromCoords.lat,
+                    zoom: 12, pitch: 65, bearing: -45
+                }, 5000)
+                .easing(TWEEN.Easing.Quadratic.InOut);
+
+            const flyToRocket = new TWEEN.Tween(cameraState)
+                .to({
+                    lng: rocket.fromCoords.lon, lat: rocket.fromCoords.lat,
+                    zoom: 12.5, pitch: 55, bearing: 45
+                }, 6000)
+                .easing(TWEEN.Easing.Quadratic.InOut);
+            
+            const returnHome = new TWEEN.Tween(cameraState)
+                .to({
+                    lng: view.center[0], lat: view.center[1],
+                    zoom: config.mapZoom, pitch: config.mapPitch, bearing: config.mapBearing
+                }, 4000)
+                .easing(TWEEN.Easing.Quadratic.InOut);
+
+            flyToShahed.chain(flyToRocket);
+            flyToRocket.chain(returnHome);
+            
+            // Do not loop, animation plays once.
+            return flyToShahed;
+       }
+       
+       function mainAnimateLoop(time) {
+           TWEEN.update(time);
+           map.setCenter([cameraState.lng, cameraState.lat]);
+           map.setZoom(cameraState.zoom);
+           map.setPitch(cameraState.pitch);
+           map.setBearing(cameraState.bearing);
+           map.triggerRepaint();
+           requestAnimationFrame(mainAnimateLoop);
+       }
+       
+       // --- 3D Model Rendering Layer (from working sandbox.html) ---
+       const customLayer = {
+           id: '3d-model-layer',
+           type: 'custom',
+           renderingMode: '3d',
+           onAdd(map, gl) {
+               this.camera = new THREE.Camera();
+               this.scene = new THREE.Scene();
+               this.map = map;
+               
+               this.scene.add(new THREE.AmbientLight(0xffffff, 3.5));
+               const directionalLight = new THREE.DirectionalLight(0xffffff, 3.0);
+               directionalLight.position.set(0.5, -1, 1);
+               this.scene.add(directionalLight);
+
+               this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true, alpha: true });
+               this.renderer.autoClear = false;
+
+               const loader = new GLTFLoader();
+               const loadedModels = {};
+
+               const modelLoadPromises = Object.entries(modelPaths).map(([item, info]) => {
+                   return new Promise((resolve, reject) => {
+                       loader.load(info.path, gltf => { loadedModels[item] = gltf.scene; resolve(); }, undefined, reject);
+                   });
+               });
+
+               Promise.all(modelLoadPromises).then(() => {
+                   objects.forEach(obj => {
+                       const baseModel = loadedModels[obj.item] || loadedModels.default;
+                       if (!baseModel) return; 
+                       
+                       const mercator = maplibregl.MercatorCoordinate.fromLngLat(obj.fromCoords);
+                       const scale = mercator.meterInMercatorCoordinateUnits() * config.modelScaleFactor;
+                       const model = baseModel.clone(true);
+                       model.matrixAutoUpdate = false;
+                       const pos = [obj.fromCoords.lon, obj.fromCoords.lat];
+                       const alt = config.modelAltitude;
+
+                       const bearing = 0; // Static bearing for simplicity in this animation
+                       const modelRotation = modelPaths[obj.item]?.rotation || 0;
+                       const rotationY = THREE.MathUtils.degToRad(-bearing + modelRotation);
+                       const rotationYMatrix = new THREE.Matrix4().makeRotationY(rotationY);
+                       const rotationXMatrix = new THREE.Matrix4().makeRotationX( - Math.PI / 2); 
+                       const combinedRotation = new THREE.Matrix4().multiplyMatrices(rotationXMatrix, rotationYMatrix);
+                       
+                       objectState[obj.id] = {
+                           model: model,
+                           mercator: maplibregl.MercatorCoordinate.fromLngLat(pos, alt),
+                           rotation: combinedRotation,
+                           scale: scale,
+                       };
+                       this.scene.add(model);
+                   });
+                   this.map.triggerRepaint();
+               });
+           },
+           render(gl, matrix) {
+               this.camera.projectionMatrix.fromArray(matrix);
+               for (const state of Object.values(objectState)) {
+                   const { model, mercator, rotation, scale } = state;
+                   const scaleMatrix = new THREE.Matrix4().makeScale(scale, -scale, scale); 
+                   const translationMatrix = new THREE.Matrix4().makeTranslation(mercator.x, mercator.y, mercator.z);
+                   model.matrix.copy(new THREE.Matrix4().multiply(translationMatrix).multiply(rotation).multiply(scaleMatrix));
+               }
+               this.renderer.resetState();
+               this.renderer.render(this.scene, this.camera);
+           }
+       };
+
+       // --- Initialization ---
+       map.on('load', () => {
+           map.addLayer(customLayer);
+           const animationChain = setupCameraAnimation();
+           animationChain.start();
+           requestAnimationFrame(mainAnimateLoop);
+       });
+
+       document.getElementById('recordButton').onclick = async () => {
+           const status = document.getElementById('recordStatus');
+           status.textContent = "Recording started...";
+           try {
+               const response = await fetch('/record');
+               const result = await response.json();
+               status.textContent = result.message;
+               setTimeout(() => status.textContent = "Click to record again.", 20000);
+           } catch (e) {
+               status.textContent = "Error starting recording. Is server running?";
+           }
+       };
+
+   </script>
+</body>
+</html>

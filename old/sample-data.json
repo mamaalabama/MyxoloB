@@ -1,0 +1,27 @@
+{
+  "modelPaths": {
+    "shahed": { "path": "/assets/shahed.gltf", "rotation": 90 },
+    "rocket": { "path": "/assets/rocket.gltf", "rotation": 90 },
+    "default": { "path": "/assets/shahed.gltf", "rotation": 90 }
+  },
+  "objects": [
+    {
+      "id": "shahed-1",
+      "quantity": 1,
+      "item": "shahed",
+      "from": "Kyiv, Ukraine",
+      "fromCoords": { "lon": 30.5234, "lat": 50.4501 }
+    },
+    {
+      "id": "rocket-1",
+      "quantity": 1,
+      "item": "rocket",
+      "from": "Kharkiv, Ukraine",
+      "fromCoords": { "lon": 36.2304, "lat": 49.9935 }
+    }
+  ],
+  "view": {
+    "center": [31.16558, 48.379433],
+    "zoom": 5
+  }
+}

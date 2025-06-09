@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Sentry Director's Cut</title>
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel='stylesheet' href='https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.css' />
+    <script src='https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.js'></script>
+    <script src="https://unpkg.com/@tweenjs/tween.js@23.1.2/dist/tween.umd.js"></script>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; width: 100%; background-color: #1a1a1a; overflow: hidden; }
+        #map { height: 100%; width: 100%; }
+        #record-controls { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.75); padding: 15px; border-radius: 8px; z-index: 10; }
+        #recordButton { padding: 10px 20px; font-size: 16px; background-color: #c0392b; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        #recordStatus { font-size: 12px; text-align: center; margin-top: 5px; color: #95a5a6; font-family: sans-serif; }
+    </style>
+    <script type="importmap">
+       { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/" } }
+    </script>
+</head>
+<body>
+    <div id="record-controls">
+       <button id="recordButton">🔴 Record Video</button>
+       <div id="recordStatus"></div>
+    </div>
+    <div id="map"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        // Data is injected here by the server
+        const mapData = __MAP_DATA__;
+        const { modelPaths, objects, view, ...config } = mapData;
+        
+        const map = new maplibregl.Map({
+            container: 'map',
+            style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+            center: view.center,
+            zoom: config.mapZoom,
+            pitch: config.mapPitch,
+            bearing: config.mapBearing,
+            interactive: false,
+            antialias: true,
+        });
+        
+        // --- Keyframes & Animation Logic ---
+        function getGroupCenter(groupIdPrefix) {
+            const groupObjects = objects.filter(o => o.id.startsWith(groupIdPrefix));
+            if (groupObjects.length === 0) return null;
+            const center = groupObjects.reduce((acc, obj) => {
+                acc.lng += obj.fromCoords.lon;
+                acc.lat += obj.fromCoords.lat;
+                return acc;
+            }, { lng: 0, lat: 0 });
+            center.lng /= groupObjects.length;
+            center.lat /= groupObjects.length;
+            return new maplibregl.LngLat(center.lng, center.lat);
+        }
+
+        const cameraState = { ...view, zoom: config.mapZoom, pitch: config.mapPitch, bearing: config.mapBearing };
+        
+        function setupCameraAnimation() {
+            const groups = [...new Set(objects.map(o => o.id.split('-')[0]))];
+            const keyframes = [];
+
+            for (const groupId of groups) {
+                const center = getGroupCenter(groupId);
+                if (center) {
+                    keyframes.push({ target: center, duration: 6000, zoom: 11, pitch: 60 });
+                }
+            }
+            // Add a final wide shot
+            keyframes.push({ target: new maplibregl.LngLat(view.center[0], view.center[1]), duration: 4000, zoom: config.mapZoom, pitch: config.mapPitch });
+
+            // Create a chain of tweens
+            const tweens = keyframes.map((frame, i) => {
+                const nextBearing = i * 90; // Add some rotation
+                return new TWEEN.Tween(cameraState)
+                    .to({ lng: frame.target.lng, lat: frame.target.lat, zoom: frame.zoom, pitch: frame.pitch, bearing: nextBearing }, frame.duration)
+                    .easing(TWEEN.Easing.Cubic.InOut);
+            });
+
+            for (let i = 0; i < tweens.length - 1; i++) {
+                tweens[i].chain(tweens[i + 1]);
+            }
+            
+            window.animationLoopDuration = keyframes.reduce((sum, kf) => sum + kf.duration, 0) + 2000;
+
+            // Loop the animation
+            tweens[tweens.length - 1].onComplete(() => {
+                window.animationReadyForRecording = true; // Signal for recorder
+                setTimeout(() => tweens[0].start(), 2000);
+            });
+            
+            return tweens[0];
+        }
+        
+        function mainAnimateLoop(time) {
+            TWEEN.update(time);
+            map.setCenter([cameraState.lng, cameraState.lat]);
+            map.setZoom(cameraState.zoom);
+            map.setPitch(cameraState.pitch);
+            map.setBearing(cameraState.bearing);
+            map.triggerRepaint();
+            requestAnimationFrame(mainAnimateLoop);
+        }
+
+        const customLayer = {
+           id: '3d-model-layer', type: 'custom', renderingMode: '3d',
+           onAdd(map, gl) {
+               this.camera = new THREE.Camera();
+               this.scene = new THREE.Scene();
+               this.map = map;
+               
+               this.scene.add(new THREE.AmbientLight(0xffffff, 3.5));
+               const directionalLight = new THREE.DirectionalLight(0xffffff, 3.0);
+               directionalLight.position.set(0.5, -1, 1);
+               this.scene.add(directionalLight);
+
+               this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true, alpha: true });
+               this.renderer.autoClear = false;
+
+               const loader = new GLTFLoader();
+               const loadedModels = {};
+
+               const modelLoadPromises = Object.entries(modelPaths).map(([item, info]) => 
+                   new Promise((resolve, reject) => loader.load(info.path, gltf => { loadedModels[item] = gltf.scene; resolve(); }, undefined, reject))
+               );
+
+               Promise.all(modelLoadPromises).then(() => {
+                    objects.forEach(obj => {
+                       const baseModel = loadedModels[obj.item] || loadedModels.default;
+                       if (!baseModel) return;
+                       
+                       const model = baseModel.clone(true);
+                       model.matrixAutoUpdate = false;
+
+                       const { lon, lat } = obj.fromCoords;
+                       const mercator = maplibregl.MercatorCoordinate.fromLngLat([lon, lat], config.modelAltitude);
+                       const scale = mercator.meterInMercatorCoordinateUnits() * config.modelScaleFactor;
+                       
+                       const modelRotation = modelPaths[obj.item]?.rotation || 0;
+                       const rotationYMatrix = new THREE.Matrix4().makeRotationY(THREE.MathUtils.degToRad(modelRotation));
+                       const rotationXMatrix = new THREE.Matrix4().makeRotationX(Math.PI / 2); 
+                       const combinedRotation = new THREE.Matrix4().multiplyMatrices(rotationXMatrix, rotationYMatrix);
+                       
+                       // *** THE CORE FIX IS HERE ***
+                       const scaleMatrix = new THREE.Matrix4().makeScale(scale, -scale, scale);
+                       const translationMatrix = new THREE.Matrix4().makeTranslation(mercator.x, mercator.y, mercator.z);
+
+                       // Apply transformations in the correct order: Translate * Rotate * Scale
+                       model.matrix.multiplyMatrices(translationMatrix, combinedRotation).multiply(scaleMatrix);
+                       
+                       this.scene.add(model);
+                    });
+                    
+                    console.log("✅ Models loaded and placed. Starting animation.");
+                    setupCameraAnimation().start();
+                    requestAnimationFrame(mainAnimateLoop);
+               });
+           },
+           render(gl, renderParams) {
+                const matrix = renderParams.defaultProjectionData.mainMatrix;
+                this.camera.projectionMatrix.fromArray(matrix);
+                this.renderer.resetState();
+                this.renderer.render(this.scene, this.camera);
+           }
+        };
+        
+        map.on('load', () => map.addLayer(customLayer));
+
+       document.getElementById('recordButton').onclick = async () => {
+           const status = document.getElementById('recordStatus');
+           status.textContent = "Recording started...";
+           try {
+               const response = await fetch('/record');
+               const result = await response.json();
+               status.textContent = result.message;
+               setTimeout(() => status.textContent = "Click to record again.", window.animationLoopDuration + 2000);
+           } catch (e) {
+               status.textContent = "Error: Is server running?";
+           }
+       };
+    </script>
+</body>
+</html>

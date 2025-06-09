@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Seamless Cinematic 3D Flight Recorder</title>
+    <meta property="og:description" content="A beautiful, seamless cinematic flight around multiple 3D models with controls for playback and video recording." />
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel='stylesheet' href='https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.css' />
+    <script src='https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js'></script>
+    <style>
+        body { margin: 0; padding: 0; }
+        html, body, #map { height: 100%; }
+        .controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            font-family: 'Helvetica Neue', Arial, Helvetica, sans-serif;
+            z-index: 1;
+        }
+        .controls button {
+            display: block;
+            width: 100%;
+            padding: 10px 15px;
+            margin-bottom: 10px;
+            font-size: 14px;
+            font-weight: bold;
+            color: white;
+            background-color: #3386c0;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        .controls button:hover {
+            background-color: #4ea0da;
+        }
+        .controls button:active {
+            transform: scale(0.98);
+        }
+        .controls button:disabled {
+            background-color: #999;
+            cursor: not-allowed;
+        }
+        .controls #status {
+            font-size: 12px;
+            text-align: center;
+            color: #555;
+            min-height: 1.2em;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+<div class="controls">
+    <button id="play-btn">Play Flight</button>
+    <button id="record-btn">Record Flight</button>
+    <div id="status">Ready</div>
+</div>
+<div id="map"></div>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+    const map = new maplibregl.Map({
+        container: 'map',
+        // Changed to satellite style for better visual effect with 3D models
+        style: 'https://api.maptiler.com/maps/hybrid/style.json?key=get_your_own_OpIi9ZULNHzrESv6T2vL',
+        zoom: 17,
+        center: [148.979, -35.397],
+        pitch: 30,
+        bearing: 0,
+        canvasContextAttributes: { antialias: true },
+        // Allows user interaction to stop the animation
+        interactive: true 
+    });
+
+    const playButton = document.getElementById('play-btn');
+    const recordButton = document.getElementById('record-btn');
+    const statusEl = document.getElementById('status');
+
+    // Define locations for three 3D models
+    const modelLocations = [
+        [148.9819, -35.39847], // Central model
+        [148.9780, -35.39950], // West model
+        [148.9845, -35.39550]  // North-east model
+    ];
+
+    const modelMeshes = []; // To hold the three.js mesh objects
+
+    // --- THREE.JS CUSTOM LAYER SETUP ---
+    const customLayer = {
+        id: '3d-models',
+        type: 'custom',
+        renderingMode: '3d', // Important for correct depth rendering with the map
+        onAdd(map, gl) {
+            this.camera = new THREE.Camera();
+            this.scene = new THREE.Scene();
+
+            // Create two three.js lights
+            const directionalLight = new THREE.DirectionalLight(0xffffff);
+            directionalLight.position.set(0, -70, 100).normalize();
+            this.scene.add(directionalLight);
+
+            const directionalLight2 = new THREE.DirectionalLight(0xffffff);
+            directionalLight2.position.set(0, 70, 100).normalize();
+            this.scene.add(directionalLight2);
+
+            // Load the GLTF model
+            const loader = new GLTFLoader();
+            loader.load(
+                'https://maplibre.org/maplibre-gl-js/docs/assets/34M_17/34M_17.gltf',
+                (gltf) => {
+                    // Apply the necessary rotation once to the base model
+                    // to make it stand upright relative to the map's coordinate system
+                    gltf.scene.rotation.x = Math.PI / 2; 
+
+                    // Clone the rotated model for each location and add to the scene
+                    for (let i = 0; i < modelLocations.length; i++) {
+                        const model = gltf.scene.clone();
+                        modelMeshes.push(model); // Store mesh for position updates
+                        this.scene.add(model);
+                    }
+                }
+            );
+            this.map = map; // Store map instance
+
+            // Setup three.js renderer using the map's GL context
+            this.renderer = new THREE.WebGLRenderer({
+                canvas: map.getCanvas(),
+                context: gl,
+                antialias: true,
+            });
+            this.renderer.autoClear = false; // Essential for rendering on top of maplibre
+        },
+        
+        render(gl, args) {
+            // Ensure models are loaded before rendering
+            if (modelMeshes.length < modelLocations.length) return;
+
+            // Get the map's projection matrix
+            const mapProjectionMatrix = new THREE.Matrix4().fromArray(args.defaultProjectionData.mainMatrix);
+
+            // Update the matrix for each individual model based on its geographic location
+            for (let i = 0; i < modelLocations.length; i++) {
+                const modelLocation = modelLocations[i];
+                const modelAltitude = 0; // Assuming models are at ground level
+
+                // Get Mercator coordinates and scale from geographic location
+                const modelAsMercatorCoordinate = maplibregl.MercatorCoordinate.fromLngLat(modelLocation, modelAltitude);
+                const scale = modelAsMercatorCoordinate.meterInMercatorCoordinateUnits();
+
+                // Calculate the transformation matrix for this model
+                const modelMatrix = new THREE.Matrix4()
+                    .makeTranslation(modelAsMercatorCoordinate.x, modelAsMercatorCoordinate.y, modelAsMercatorCoordinate.z)
+                    // Scale: MapLibre y (north) needs negative scale relative to THREE.js y (up)
+                    .scale(new THREE.Vector3(scale, -scale, scale)); 
+
+                // Apply the calculated matrix to the individual mesh's matrix property
+                // matrixAutoUpdate should be false if manually setting matrix
+                modelMeshes[i].matrixAutoUpdate = false; 
+                modelMeshes[i].matrix.copy(modelMatrix);
+                // Note: The base rotation (Math.PI/2 on X) was applied once when loading,
+                // so it's already part of the model's internal geometry/local matrix.
+                // We are now setting the world matrix of the object based on the map's projection.
+            }
+
+            // Set the camera's projection matrix to the map's projection matrix
+            this.camera.projectionMatrix.copy(mapProjectionMatrix);
+
+            // Render the entire Three.js scene using the configured camera and renderer
+            this.renderer.resetState(); // Reset GL state changed by maplibre
+            this.renderer.render(this.scene, this.camera);
+            this.map.triggerRepaint(); // Request repaint on the next frame
+        }
+    };
+
+    // Add the custom layer once the map style is loaded
+    map.on('style.load', () => map.addLayer(customLayer));
+
+    // --- SEAMLESS ANIMATION AND RECORDING LOGIC ---
+
+    const flightPath = [
+        // Fly towards Model 1 (initial approach)
+        {
+            center: [148.9819, -35.3980], // Approach point near Model 1
+            zoom: 17.5,
+            pitch: 45,
+            bearing: 30,
+            speed: 0.8,
+            curve: 1.2,
+            easing: (t) => t // Linear easing for a constant approach speed
+        },
+        // Fly closer to Model 1 and transition to circle
+        {
+            center: modelLocations[0], // Center on Model 1
+            zoom: 19, // Closer zoom
+            pitch: 60, // Look down more
+            bearing: 60,
+            speed: 0.5, // Slow down for closer look
+            curve: 1,
+            easing: (t) => 1 - Math.pow(1 - t, 3) // easeOutCubic
+        },
+        // Circle around Model 1
+        {
+            type: 'circle',
+            center: modelLocations[0],
+            duration: 10000, // Duration for the full circle
+            angle: 360, // Rotate 360 degrees
+            radius: 0.0005, // Orbit radius in degrees (adjust to frame model nicely)
+            pitch: 55, // Maintain pitch during circle
+            zoom: 18.5 // Maintain zoom during circle
+        },
+        // Fly from Model 1 towards Model 2
+        {
+            center: modelLocations[1], // Fly towards Model 2
+            zoom: 18,
+            pitch: 45,
+            bearing: -30,
+            speed: 0.6, // Pick up speed
+            curve: 1.5,
+            easing: (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2 // easeInOutCubic
+        },
+        // Fly from Model 2 towards Model 3
+        {
+            center: modelLocations[2], // Fly towards Model 3
+            zoom: 18.8,
+            pitch: 65,
+            bearing: 120,
+            speed: 0.7,
+            curve: 1.3,
+             easing: (t) => 1 - Math.pow(1 - t, 4) // easeOutQuart
+        },
+        // Fly out to a wider view of all models
+         {
+            center: [148.9815, -35.3975],
+            zoom: 16.5,
+            pitch: 30,
+            bearing: 20,
+            duration: 5000,
+            easing: (t) => 1 - Math.pow(1 - t, 2) // easeOutQuad
+        }
+    ];
+
+    // State variables for animation control
+    let isAnimationRunning = false;
+    let isUserInteracting = false;
+    let animationPromiseResolve = null; // To signal completion of a circle animation segment
+
+    // Stop animation if user interacts with the map
+    const stopAnimation = () => {
+         if (isAnimationRunning) {
+            isAnimationRunning = false;
+            // If a circle animation is running, resolve its promise to stop the loop
+            if (animationPromiseResolve) {
+                animationPromiseResolve();
+                animationPromiseResolve = null;
+            }
+            map.stop(); // Stop any ongoing flyTo/easeTo animation
+            setUiState(false, 'Animation interrupted.');
+         }
+         isUserInteracting = true; // Keep track that user has interacted
+    };
+
+    map.on('mousedown', stopAnimation);
+    map.on('touchstart', stopAnimation);
+    map.on('wheel', stopAnimation);
+    map.on('keydown', stopAnimation); // Detect keyboard interaction too
+
+    // Reset user interaction flag when interaction ends, *after* animation might have stopped
+    map.on('mouseup', () => isUserInteracting = false);
+    map.on('touchend', () => isUserInteracting = false);
+    map.on('mouseout', () => isUserInteracting = false); // Handle mouse leaving map area
+    map.on('mouseleave', () => isUserInteracting = false);
+    map.on('keyup', () => isUserInteracting = false);
+
+
+    // Function to animate a circle segment
+    function animateCircle(options) {
+        return new Promise((resolve) => {
+            animationPromiseResolve = resolve; // Store resolve function to allow external stopping
+            const { duration, center, angle, pitch, zoom, radius } = options;
+            const startBearing = map.getBearing();
+            const endBearing = startBearing + angle; // Calculate target bearing
+
+            let startTime;
+
+            function frame(timestamp) {
+                // Check if animation should stop (user interaction or externally stopped)
+                if (!isAnimationRunning || isUserInteracting) {
+                     resolve(); // Resolve promise to exit
+                     animationPromiseResolve = null; // Clear resolver
+                     return;
+                }
+
+                if (!startTime) startTime = timestamp;
+                const progress = (timestamp - startTime) / duration;
+
+                if (progress >= 1) {
+                    // Ensure final state is set precisely
+                    map.easeTo({ 
+                        center, 
+                        zoom, 
+                        pitch, 
+                        bearing: endBearing, 
+                        duration: 0 
+                    });
+                    resolve(); // Animation segment finished
+                    animationPromiseResolve = null; // Clear resolver
+                    return;
+                }
+
+                // Calculate interpolated bearing and camera position for orbiting
+                const currentBearing = startBearing + angle * progress;
+                
+                // Calculate position on the circle around the center point
+                // This requires converting center to Mercator, offsetting, then converting back
+                const centerMercator = maplibregl.MercatorCoordinate.fromLngLat(center);
+                // Calculate offset from center based on bearing and radius
+                // Note: This simple offset assumes a small radius relative to map scale.
+                // For large orbits or poles, more complex geo calculations might be needed.
+                const bearingRad = currentBearing * Math.PI / 180;
+                const offsetX = radius * Math.sin(bearingRad);
+                const offsetY = radius * Math.cos(bearingRad); // y increases towards north in MapLibre Mercator
+
+                const currentMercator = new maplibregl.MercatorCoordinate(
+                     centerMercator.x + offsetX * centerMercator.meterInMercatorCoordinateUnits(),
+                     centerMercator.y - offsetY * centerMercator.meterInMercatorCoordinateUnits(), // Negative scale for y!
+                     centerMercator.z // Assuming orbit at same altitude
+                );
+
+                const currentLngLat = currentMercator.toLngLat();
+
+
+                // Smoothly update camera parameters
+                map.easeTo({ 
+                    center: currentLngLat, 
+                    zoom, 
+                    pitch, 
+                    bearing: currentBearing, 
+                    duration: 0 // Duration 0 for per-frame updates
+                });
+
+                // Request next frame
+                requestAnimationFrame(frame);
+            }
+            // Start the circle animation loop
+            requestAnimationFrame(frame);
+        });
+    }
+
+
+    // Main function to run the entire flight animation sequence
+    async function runFlightAnimation() {
+        if (isAnimationRunning) return; // Prevent starting multiple animations
+
+        isAnimationRunning = true;
+        isUserInteracting = false; // Reset user interaction flag at start
+        setUiState(true, 'Animation in progress...');
+
+        // Store the current map state before starting, so we can potentially
+        // start the first flight segment from the map's current view.
+        let currentCameraOptions = {
+             center: map.getCenter(),
+             zoom: map.getZoom(),
+             pitch: map.getPitch(),
+             bearing: map.getBearing()
+             // speed, curve, easing etc. will be taken from the chapter
+        };
+
+        try {
+            for (const chapter of flightPath) {
+                // Check stop conditions at the start of each segment
+                if (!isAnimationRunning || isUserInteracting) {
+                    console.log("Animation stopped early.");
+                    break; // Exit the loop if animation is stopped
+                }
+
+                if (chapter.type === 'circle') {
+                     // Circle animation segment
+                    await animateCircle({
+                         ...chapter, // duration, center, angle
+                         // Also include pitch, zoom, radius from chapter options
+                         pitch: chapter.pitch !== undefined ? chapter.pitch : currentCameraOptions.pitch,
+                         zoom: chapter.zoom !== undefined ? chapter.zoom : currentCameraOptions.zoom,
+                         radius: chapter.radius !== undefined ? chapter.radius : 0.0005 // Default radius if not specified
+                    });
+
+                } else {
+                    // flyTo animation segment
+                    const flyOptions = {
+                        ...currentCameraOptions, // Start from current map state
+                        ...chapter,             // Override with chapter options
+                        essential: true         // Ensure animation plays
+                    };
+                    
+                    await new Promise(resolve => {
+                        map.once('moveend', resolve); // Wait for flyTo to finish
+                        map.flyTo(flyOptions);
+                    });
+                }
+
+                // Update current camera options to the map's state AFTER the segment completes
+                currentCameraOptions = {
+                    center: map.getCenter(),
+                    zoom: map.getZoom(),
+                    pitch: map.getPitch(),
+                    bearing: map.getBearing()
+                };
+            }
+        } catch (error) {
+            console.error("Animation error:", error);
+        } finally {
+            // Ensure flags and UI are reset after the sequence finishes or is interrupted
+            isAnimationRunning = false;
+            isUserInteracting = false; // Reset user interaction flag
+            animationPromiseResolve = null; // Clear resolver
+            setUiState(false, isAnimationRunning ? 'Animation interrupted.' : 'Flight complete. Ready.');
+             // Re-enable map interactivity if it was disabled (optional, map is already interactive)
+             // map.interactive = true; 
+        }
+    }
+
+
+    // --- VIDEO RECORDING ---
+
+    async function recordFlight() {
+         if (isAnimationRunning) {
+             console.log("Cannot record, animation is already running.");
+             return;
+         }
+
+        setUiState(true, 'Recording...');
+        const canvas = map.getCanvas();
+        // Get a video stream from the canvas at 30 FPS
+        const stream = canvas.captureStream(30); 
+        // Create MediaRecorder. VP9 is a good codec for quality and compatibility in webm.
+        const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9' });
+
+        const chunks = [];
+        // Collect video data chunks
+        recorder.ondataavailable = (event) => {
+            if (event.data.size > 0) chunks.push(event.data);
+        };
+
+        // When recording stops, create a Blob and trigger download
+        recorder.onstop = () => {
+            const blob = new Blob(chunks, { type: 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            document.body.appendChild(a); // Required for Firefox
+            a.style.display = 'none';
+            a.href = url;
+            a.download = 'map-flight.webm'; // Suggested filename
+            a.click();
+            URL.revokeObjectURL(url); // Clean up the temporary URL
+            document.body.removeChild(a); // Clean up the temporary link
+            setUiState(false, 'Video saved. Ready.');
+        };
+
+        // Start recording
+        recorder.start();
+        
+        // Run the animation and wait for it to complete
+        await runFlightAnimation();
+        
+        // Stop recording after the animation finishes
+        recorder.stop();
+    }
+
+    // --- UI MANAGEMENT ---
+
+    // Helper function to manage button states and status text
+    function setUiState(isBusy, statusText) {
+        playButton.disabled = isBusy;
+        recordButton.disabled = isBusy;
+        statusEl.textContent = statusText;
+        // Optional: Disable map interaction entirely during playback/recording if needed
+        // map.interactive = !isBusy;
+    }
+
+    // Add event listeners to the buttons
+    playButton.addEventListener('click', runFlightAnimation);
+    recordButton.addEventListener('click', recordFlight);
+
+</script>
+
+</body>
+</html>
